@@ -1,3 +1,4 @@
+
 .\venv\Scripts\Activate
 
 install the required tools and dependencies inside requirements.txt
