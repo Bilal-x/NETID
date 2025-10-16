@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 import joblib
@@ -29,13 +30,8 @@ def load_preprocess_data(train_path, test_path):
     train_df[categorical_cols] = encoder.fit_transform(train_df[categorical_cols])
     test_df[categorical_cols] = encoder.transform(test_df[categorical_cols])
 
-    # Debug print dtypes
-    print("Data types before scaling (train):")
-    print(train_df.dtypes)
-
     # Columns to scale (numeric features excluding categorical and labels)
     numeric_cols = [col for col in train_df.columns if col not in ['label', 'difficulty'] + categorical_cols]
-    print("Numeric columns to scale:", numeric_cols)
 
     scaler = StandardScaler()
     train_df[numeric_cols] = scaler.fit_transform(train_df[numeric_cols])
@@ -52,6 +48,30 @@ def train_model(train_df):
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
     return model
+
+def preprocess_features(input_features, encoder, scaler):
+    """
+    Preprocess a list of input features for a single NSL-KDD record.
+    input_features: list, strictly in the correct order required by the model (41 values).
+    encoder: Loaded encoder instance
+    scaler: Loaded scaler instance
+    Returns: numpy array ready for model prediction (shape: (n_features,))
+    """
+    # Only first 41 features (exclude label, difficulty; user never enters these)
+    expected_cols = columns[:-2]
+    categorical_cols = ['protocol_type', 'service', 'flag']
+    numeric_cols = [col for col in expected_cols if col not in categorical_cols]
+
+    # Build DataFrame for transformation
+    df = pd.DataFrame([input_features], columns=expected_cols)
+
+    # Encode categorical columns
+    df[categorical_cols] = encoder.transform(df[categorical_cols])
+
+    # Scale numeric columns
+    df[numeric_cols] = scaler.transform(df[numeric_cols])
+
+    return df.values.flatten()
 
 if __name__ == "__main__":
     train_file = '../data/KDDTrain+.txt'
