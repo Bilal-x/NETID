@@ -3,19 +3,23 @@ from dash import dcc, html, Input, Output, State
 import pandas as pd
 import joblib
 import threading
-from src.realtime.packet_capture import start_live_capture, live_results
+from src.realtime.packet_capture import start_capture_thread, stop_capture, live_results
+from src.realtime.prevention import get_prevention_logs, get_blocked_ips
+
 
 # Load saved objects once
 scaler = joblib.load('models/scaler.joblib')
 encoder = joblib.load('models/encoder.joblib')
 model = joblib.load('models/model.joblib')
 
+
 CHECK_ICON = '✅'
 WARNING_ICON = '⚠️'
 
+
 dark_green_text = '#009900'
-darker_green_bg = '#006600'
 dark_background = '#0f0f0f'
+
 
 FEATURE_NAMES = [
     'duration','protocol_type','service','flag','src_bytes','dst_bytes','land',
@@ -31,14 +35,15 @@ FEATURE_NAMES = [
 
 app = dash.Dash(__name__)
 
+capture_thread = None
+
 app.layout = html.Div([
     html.H2("NITD Real-Time Intrusion Detection",
             style={'color': dark_green_text, 'font-family': 'Courier New, monospace', 'text-align': 'center', 'margin-bottom': '25px'}),
-
     html.Div([
         html.Label("Enter network data record as CSV line:",
                    style={'color': dark_green_text, 'font-family': 'Courier New, monospace', 'font-size': '18px'}),
-        html.Span(" (Format: duration,protocol_type,service,flag,src_bytes,dst_bytes,land,...)", 
+        html.Span(" (Format: duration,protocol_type,service,flag,src_bytes,dst_bytes,land,...)",
                   title="Enter raw network traffic features as a single comma-separated CSV line. See project docs for full field list.",
                   style={'color': dark_green_text, 'font-family': 'Courier New, monospace', 'font-size': '12px', 'margin-left': '10px', 'cursor': 'help'}),
         dcc.Textarea(
@@ -58,14 +63,13 @@ app.layout = html.Div([
             }
         ),
     ], style={'margin-bottom': '20px'}),
-
     html.Div([
         html.Button('Detect Anomaly', id='detect-btn',
                     style={
                         'width': '48%',
                         'padding': '15px',
                         'backgroundColor': dark_green_text,
-                        'color': dark_background,
+                        'color': '#0f0f0f',
                         'font-family': 'Courier New, monospace',
                         'font-weight': 'bold',
                         'font-size': '18px',
@@ -88,7 +92,6 @@ app.layout = html.Div([
                         'cursor': 'pointer',
                     }),
     ], style={'margin-bottom': '30px', 'display': 'flex', 'justify-content': 'space-between'}),
-
     html.Div(id='output-prediction', style={
         'font-family': 'Courier New, monospace',
         'font-size': '22px',
@@ -102,7 +105,6 @@ app.layout = html.Div([
         'resize': 'none',
         'margin-top': '10px',
     }),
-
     html.Div(id='anomaly-reason', style={
         'font-family': 'Courier New, monospace',
         'font-size': '16px',
@@ -110,7 +112,6 @@ app.layout = html.Div([
         'margin-top': '10px',
         'display': 'none',
     }),
-
     html.Div(id='input-breakdown', style={
         'font-family': 'Courier New, monospace',
         'font-size': '14px',
@@ -125,31 +126,49 @@ app.layout = html.Div([
         'border': f'1px solid {dark_green_text}',
         'display': 'none'
     }),
-
     dcc.Loading(
         id="loading-spinner",
         type="circle",
         fullscreen=False,
         children=html.Div(id="loading-output")
     ),
-
-    html.Button(
-        "Capture Live Incoming Networks",
-        id="live-capture-btn",
-        style={
-            'width': '100%',
-            'padding': '15px',
-            'backgroundColor': '#003366',
-            'color': '#fff',
-            'font-family': 'Courier New, monospace',
-            'font-weight': 'bold',
-            'font-size': '18px',
-            'border': 'none',
-            'border-radius': '5px',
-            'cursor': 'pointer',
-            'margin-top': '24px'
-        }
-    ),
+    html.Div([
+        html.Button(
+            "Capture Live Incoming Networks",
+            id="live-capture-btn",
+            style={
+                'width': '48%',
+                'padding': '15px',
+                'backgroundColor': '#003366',
+                'color': '#fff',
+                'font-family': 'Courier New, monospace',
+                'font-weight': 'bold',
+                'font-size': '18px',
+                'border': 'none',
+                'border-radius': '5px',
+                'cursor': 'pointer',
+                'margin-top': '24px',
+                'margin-right': '4%'
+            }
+        ),
+        html.Button(
+            "Stop Capturing",
+            id="stop-capture-btn",
+            style={
+                'width': '48%',
+                'padding': '15px',
+                'backgroundColor': '#660000',
+                'color': '#fff',
+                'font-family': 'Courier New, monospace',
+                'font-weight': 'bold',
+                'font-size': '18px',
+                'border': 'none',
+                'border-radius': '5px',
+                'cursor': 'pointer',
+                'margin-top': '24px'
+            }
+        )
+    ]),
     html.Div(id="live-capture-status", style={
         'margin-top': '10px',
         'font-family': 'Courier New, monospace',
@@ -164,12 +183,33 @@ app.layout = html.Div([
         'color': '#FFA500',
         'white-space': 'pre'
     }),
-
     dcc.Interval(id='live-poll-interval', interval=1000, n_intervals=0),  # Every 1s
-
+    html.H3("🛡️ Prevention Dashboard",
+            style={'color': '#FF6600', 'font-family': 'Courier New, monospace', 'margin-top': '30px',}),
+    html.Div([
+        html.Div([
+            html.H4("🚫 Blocked IPs", style={'color': '#FF3333'}),
+            html.Div(id="blocked-ips-list", style={'font-family': 'Courier New, monospace', 'color': '#FF3333'})
+        ], style={'width': '48%', 'display': 'inline-block'}),
+        html.Div([
+            html.H4("📋 Prevention Logs", style={'color': '#FFA500'}),
+            html.Div(id="prevention-logs", style={'font-family': 'Courier New, monospace',
+                                                 'color': '#FFA500',
+                                                 'white-space': 'pre-wrap',
+                                                 'word-break': 'break-word',
+                                                 'overflow-x': 'auto',
+                                                 'max-width': '100%',
+                                                 'box-sizing': 'border-box'})
+        ], style={'width': '48%', 'display': 'inline-block', 'margin-left': '4%'})
+    ]),
     html.Div(id='matrix-rain', style={
-        'position': 'fixed', 'top': 0, 'left': 0, 'width': '100%', 'height': '100%', 
-        'zIndex': '-1', 'pointerEvents': 'none'
+        'font-family': 'Courier New, monospace',
+        'color': '#FFA500',
+        'white-space': 'pre-wrap',  # Enable wrapping for long lines
+        'word-break': 'break-all',  # Break long words if needed
+        'overflow-x': 'auto',  # Allow horizontal scrollbar if absolutely needed
+        'max-width': '100%',  # Keep within parent container
+        'box-sizing': 'border-box'
     }),
 ], style={
     'backgroundColor': dark_background,
@@ -181,6 +221,7 @@ app.layout = html.Div([
     'border-radius': '10px',
     'box-shadow': f'0 0 20px {dark_green_text}'
 })
+
 
 @app.callback(
     [
@@ -215,12 +256,14 @@ def handle_buttons(detect_clicks, clear_clicks, input_value):
                 error_msg = f"⚠️ Error: Expected {len(FEATURE_NAMES)} features but got {len(input_values)}."
                 return dash.no_update, error_msg, {'color': '#FF3333'}, '', {'display': 'none'}, '', {'display': 'none'}
 
+
             raw_df = pd.DataFrame([input_values], columns=FEATURE_NAMES)
             cat_cols = ['protocol_type', 'service', 'flag']
             raw_df[cat_cols] = encoder.transform(raw_df[cat_cols])
             numeric_cols = [col for col in raw_df.columns if col not in cat_cols + ['difficulty']]
             raw_df[numeric_cols] = scaler.transform(raw_df[numeric_cols])
             pred = model.predict(raw_df)
+
 
             if pred[0] == 'normal':
                 pred_style = {
@@ -243,6 +286,7 @@ def handle_buttons(detect_clicks, clear_clicks, input_value):
                 anomaly_reason = "Anomaly detected: Network behavior deviates from normal patterns."
                 anomaly_style = {'color': '#FF3333', 'marginTop': '10px', 'font-family': 'Courier New, monospace', 'font-weight': 'bold', 'display': 'block'}
 
+
             breakdown_lines = [f"{name}: {value}" for name, value in zip(FEATURE_NAMES, input_values)]
             breakdown_text = "\n".join(breakdown_lines)
             breakdown_style = {
@@ -260,37 +304,68 @@ def handle_buttons(detect_clicks, clear_clicks, input_value):
                 'display': 'block'
             }
 
+
             return dash.no_update, f"{icon} Prediction: {pred[0]}", pred_style, anomaly_reason, anomaly_style, breakdown_text, breakdown_style
+
 
         except Exception as e:
             error_msg = f"⚠️ Error processing input: {str(e)}"
             return dash.no_update, error_msg, {'color': '#FF3333', 'font-family': 'Courier New, monospace'}, '', {'display': 'none'}, '', {'display': 'none'}
     return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
-capture_thread = None
+
 @app.callback(
-    [Output("live-capture-status", "children")],
-    [Input("live-capture-btn", "n_clicks")]
+    Output("live-capture-status", "children"),
+    [Input("live-capture-btn", "n_clicks"),
+     Input("stop-capture-btn", "n_clicks")]
 )
-def launch_live_capture(n_clicks):
+def control_live_capture(start_clicks, stop_clicks):
+    ctx = dash.callback_context
+
+    if not ctx.triggered:
+        return ""
+
+    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
     global capture_thread
-    if n_clicks:
+
+    if button_id == "live-capture-btn":
         if not capture_thread:
-            capture_thread = threading.Thread(target=start_live_capture, daemon=True)
+            capture_thread = threading.Thread(target=start_capture_thread, daemon=True)
             capture_thread.start()
-            return ["Live network capture started."]
+            return "Live network capture started."
         else:
-            return ["Live capture is already running."]
-    return [""]
+            return "Live capture is already running."
+
+    elif button_id == "stop-capture-btn":
+        stop_capture()
+        return "Live network capture stopped."
+
+    return ""
+
 
 @app.callback(
     Output("live-capture-output", "children"),
-    [Input("live-poll-interval", "n_intervals")]
+    Input("live-poll-interval", "n_intervals")
 )
 def update_live_output(n):
     if live_results:
         return html.Pre("\n".join(live_results[-15:]), style={"color": "#FFA500"})
     return "Waiting for packets or capturing not started."
+
+
+@app.callback(
+    [Output("blocked-ips-list", "children"),
+     Output("prevention-logs", "children")],
+    Input("live-poll-interval", "n_intervals")
+)
+def update_prevention_dashboard(n):
+    blocked = get_blocked_ips()
+    blocked_display = html.Ul([html.Li(ip) for ip in blocked]) if blocked else "No IPs blocked yet"
+    logs = get_prevention_logs()
+    logs_display = html.Pre("\n".join(logs)) if logs else "No prevention actions yet"
+    return blocked_display, logs_display
+
 
 app.clientside_callback(
     """
@@ -342,6 +417,7 @@ app.clientside_callback(
     Output('matrix-rain', 'children'),
     Input('input-data', 'value')
 )
+
 
 if __name__ == '__main__':
     app.run(debug=True)

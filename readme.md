@@ -2,6 +2,8 @@
 
 .\venv\Scripts\Activate
 
+to run the script: python -m src.app 
+
 install the required tools and dependencies inside requirements.txt
 
 pip install -r requirements.txt
